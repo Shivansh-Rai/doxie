@@ -9,6 +9,7 @@ Then open http://127.0.0.1:8000
 
 Requires Ollama running locally: https://ollama.com
 Example: ollama pull llama3.2
+
 """
 
 from __future__ import annotations
