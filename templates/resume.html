@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% set nav_resume = true %}
+
+{% block content %}
+<section class="hero">
+  <h1>Resume Analyzer</h1>
+  <p class="hero-lead">Upload a résumé, enter the role you are hiring for or aiming at—local model extracts skills, projects, and a suitability score.</p>
+</section>
+
+<div class="resume-layout">
+  <section class="panel glass">
+    <div class="panel-head">
+      <h2>Résumé</h2>
+    </div>
+    <label class="upload-zone compact" id="dropZone">
+      <input type="file" id="fileInput" accept=".pdf,.txt,.md" hidden />
+      <div class="upload-inner">
+        <strong>Upload resume</strong>
+        <span>PDF / TXT / MD</span>
+      </div>
+    </label>
+
+    <label class="field-label" for="resumeText">Extracted text <span class="hint">(editable)</span></label>
+    <textarea id="resumeText" class="doc-editor" rows="12" placeholder="Paste or upload resume text…"></textarea>
+
+    <label class="field-label" for="roleInput">Type the role to check your fit</label>
+    <input type="text" id="roleInput" class="text-input" placeholder="e.g. Senior Backend Engineer" />
+
+    <div class="btn-row">
+      <button type="button" class="btn primary" id="btnAnalyze">Analyze</button>
+    </div>
+    <p class="status-line" id="statusLine"></p>
+  </section>
+
+  <section class="panel glass results-panel">
+    <div class="panel-head">
+      <h2>Analysis</h2>
+    </div>
+    <div id="emptyState" class="empty-state">Run analysis to see structured output.</div>
+    <div id="resultBox" class="result-grid" hidden>
+      <article class="result-card">
+        <h3>Type your role</h3>
+        <p id="outRole" class="prose"></p>
+      </article>
+      <article class="result-card">
+        <h3>Key skills</h3>
+        <p id="outSkills" class="prose"></p>
+      </article>
+      <article class="result-card">
+        <h3>Project details</h3>
+        <p id="outProjects" class="prose"></p>
+      </article>
+      <article class="result-card highlight">
+        <h3>Suitable for the role</h3>
+        <div class="score-ring">
+          <span id="outScore" class="score-num">—</span>
+          <span class="score-max">/10</span>
+        </div>
+        <p id="outWhy" class="prose muted-small"></p>
+      </article>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const resumeText = $("resumeText");
+  const fileInput = $("fileInput");
+  const dropZone = $("dropZone");
+  const roleInput = $("roleInput");
+  const btnAnalyze = $("btnAnalyze");
+  const statusLine = $("statusLine");
+  const emptyState = $("emptyState");
+  const resultBox = $("resultBox");
+
+  function credJson() {
+    return { credentials: "same-origin", headers: { "Content-Type": "application/json" } };
+  }
+
+  function apiDetail(data) {
+    const d = data && data.detail;
+    if (typeof d === "string") return d;
+    if (Array.isArray(d)) {
+      return d.map((x) => (x.msg != null ? x.msg : JSON.stringify(x))).join("; ");
+    }
+    return "";
+  }
+
+  dropZone.addEventListener("click", () => fileInput.click());
+  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("drag"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag"));
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("drag");
+    const f = e.dataTransfer.files?.[0];
+    if (f) uploadFile(f);
+  });
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files?.[0];
+    if (f) uploadFile(f);
+    fileInput.value = "";
+  });
+
+  async function uploadFile(file) {
+    statusLine.textContent = "Extracting…";
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch("/api/upload", { method: "POST", body: fd, credentials: "same-origin" });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiDetail(data) || r.statusText);
+      resumeText.value = data.text || "";
+      statusLine.textContent = data.warning || "Ready to analyze.";
+    } catch (e) {
+      statusLine.textContent = String(e.message || e);
+      statusLine.style.color = "var(--danger)";
+    }
+  }
+
+  btnAnalyze.addEventListener("click", async () => {
+    statusLine.style.color = "var(--muted)";
+    statusLine.textContent = "Analyzing with local model…";
+    try {
+      const r = await fetch("/api/resume/analyze", {
+        method: "POST",
+        ...credJson(),
+        body: JSON.stringify({ resume_text: resumeText.value, role: roleInput.value }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiDetail(data) || r.statusText);
+      emptyState.hidden = true;
+      resultBox.hidden = false;
+      $("outRole").textContent = data.role || roleInput.value;
+      $("outSkills").textContent = data.key_skills || "—";
+      $("outProjects").textContent = data.project_details || "—";
+      const sc = data.suitability_score;
+      $("outScore").textContent = sc != null ? String(sc) : "—";
+      $("outWhy").textContent = data.suitability_rationale || "";
+      statusLine.textContent = "Done.";
+    } catch (e) {
+      statusLine.textContent = String(e.message || e);
+      statusLine.style.color = "var(--danger)";
+    }
+  });
+})();
+</script>
+{% endblock %}

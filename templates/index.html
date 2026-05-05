@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% set nav_doc = true %}
+
+{% block content %}
+<section class="hero">
+  <h1>DOXIE Doc Analysis</h1>
+  <p class="hero-lead">Upload PDF or text, refine extraction, optionally summarize, then chat—answers stay grounded in what you indexed.</p>
+</section>
+
+<div class="layout-split">
+  <section class="panel glass">
+    <div class="panel-head">
+      <h2>Source</h2>
+      <span class="badge" id="indexBadge">Not indexed</span>
+    </div>
+
+    <label class="upload-zone" id="dropZone">
+      <input type="file" id="fileInput" accept=".pdf,.txt,.md" hidden />
+      <div class="upload-inner">
+        <strong>Drop a file</strong>
+        <span>PDF, TXT, or Markdown — processed locally</span>
+      </div>
+    </label>
+
+    <div class="controls-row">
+      <label class="check fancy">
+        <input type="checkbox" id="autoSummarize" />
+        <span>Auto-summarize after sync</span>
+      </label>
+    </div>
+
+    <label class="field-label" for="docText">Extracted text <span class="hint">(editable)</span></label>
+    <textarea id="docText" class="doc-editor" rows="14" placeholder="Upload a document or paste text here…"></textarea>
+
+    <div class="btn-row">
+      <button type="button" class="btn primary" id="btnSync">Sync knowledge base</button>
+      <button type="button" class="btn ghost" id="btnSummarize">Summarize</button>
+      <button type="button" class="btn ghost" id="btnRefurbish">Refurbish system</button>
+      <span class="filename-tag" id="filenameTag"></span>
+    </div>
+
+    <div class="summary-panel glass-inner" id="summaryPanel" hidden>
+      <div class="summary-head">
+        <h3>AI summary</h3>
+      </div>
+      <div class="summary-body prose" id="summaryBody"></div>
+    </div>
+
+    <p class="status-line" id="statusLine"></p>
+  </section>
+
+  <section class="panel glass chat-panel">
+    <div class="panel-head">
+      <h2>Conversation</h2>
+      <button type="button" class="btn tiny ghost" id="btnClearChat">Clear</button>
+    </div>
+    <div class="chat-thread" id="chatThread"></div>
+    <form class="chat-form" id="chatForm">
+      <input type="text" id="chatInput" class="chat-input" placeholder="Ask something about your document…" autocomplete="off" />
+      <button type="submit" class="btn primary">Send</button>
+    </form>
+  </section>
+</div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const docText = $("docText");
+  const fileInput = $("fileInput");
+  const dropZone = $("dropZone");
+  const btnSync = $("btnSync");
+  const btnSummarize = $("btnSummarize");
+  const btnRefurbish = $("btnRefurbish");
+  const btnClearChat = $("btnClearChat");
+  const chatThread = $("chatThread");
+  const chatForm = $("chatForm");
+  const chatInput = $("chatInput");
+  const statusLine = $("statusLine");
+  const indexBadge = $("indexBadge");
+  const filenameTag = $("filenameTag");
+  const autoSummarize = $("autoSummarize");
+  const summaryPanel = $("summaryPanel");
+  const summaryBody = $("summaryBody");
+
+  let currentFilename = "document.txt";
+
+  function credentials() {
+    return { credentials: "same-origin", headers: { "Content-Type": "application/json" } };
+  }
+
+  function apiDetail(data) {
+    const d = data && data.detail;
+    if (typeof d === "string") return d;
+    if (Array.isArray(d)) {
+      return d.map((x) => (x.msg != null ? x.msg : JSON.stringify(x))).join("; ");
+    }
+    return "";
+  }
+
+  function setStatus(msg, isErr) {
+    statusLine.textContent = msg || "";
+    statusLine.style.color = isErr ? "var(--danger)" : "var(--muted)";
+  }
+
+  function renderMessages(messages) {
+    chatThread.innerHTML = "";
+    messages.forEach((m) => appendBubble(m.role, m.content, false));
+    chatThread.scrollTop = chatThread.scrollHeight;
+  }
+
+  function appendBubble(role, content, scroll) {
+    const div = document.createElement("div");
+    div.className = "bubble " + (role === "user" ? "user" : "ai");
+    div.textContent = content;
+    chatThread.appendChild(div);
+    if (scroll !== false) chatThread.scrollTop = chatThread.scrollHeight;
+  }
+
+  async function refreshSession() {
+    try {
+      const r = await fetch("/api/session", { credentials: "same-origin" });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      renderMessages(data.chat || []);
+      const chunks = data.indexed_chunks ?? 0;
+      const fn = data.doc?.filename || "";
+      if (fn) {
+        currentFilename = fn;
+        filenameTag.textContent = fn;
+      }
+      if (chunks > 0) {
+        indexBadge.textContent = chunks + " chunks indexed";
+        indexBadge.classList.add("ok");
+      } else {
+        indexBadge.textContent = "Not indexed";
+        indexBadge.classList.remove("ok");
+      }
+    } catch (e) {
+      setStatus("Session sync failed — reload the page.", true);
+    }
+  }
+
+  dropZone.addEventListener("click", () => fileInput.click());
+  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("drag"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag"));
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("drag");
+    const f = e.dataTransfer.files?.[0];
+    if (f) uploadFile(f);
+  });
+
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files?.[0];
+    if (f) uploadFile(f);
+    fileInput.value = "";
+  });
+
+  async function uploadFile(file) {
+    setStatus("Extracting text…");
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch("/api/upload", { method: "POST", body: fd, credentials: "same-origin" });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiDetail(data) || r.statusText);
+      docText.value = data.text || "";
+      currentFilename = data.filename || file.name;
+      filenameTag.textContent = currentFilename;
+      summaryPanel.hidden = true;
+      setStatus(data.warning || "Extracted. Edit if needed, then sync.");
+      await refreshSession();
+      if (autoSummarize.checked && docText.value.trim()) {
+        await runSummarize(true);
+      }
+    } catch (e) {
+      setStatus(String(e.message || e), true);
+    }
+  }
+
+  async function runSummarize(fromAuto) {
+    const text = docText.value.trim();
+    if (!text) {
+      setStatus("No text to summarize.", true);
+      return;
+    }
+    setStatus(fromAuto ? "Auto-summarizing…" : "Summarizing…");
+    try {
+      const r = await fetch("/api/summarize", {
+        method: "POST",
+        ...credentials(),
+        body: JSON.stringify({ text }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiDetail(data) || r.statusText);
+      summaryBody.textContent = data.summary || "";
+      summaryPanel.hidden = false;
+      setStatus("Summary ready.");
+    } catch (e) {
+      setStatus(String(e.message || e), true);
+    }
+  }
+
+  btnSummarize.addEventListener("click", () => runSummarize(false));
+
+  btnRefurbish.addEventListener("click", async () => {
+    const ok = window.confirm("Delete all uploaded/indexed data and reset the system?");
+    if (!ok) return;
+    setStatus("Refurbishing system…");
+    try {
+      const r = await fetch("/api/system/refurbish", { method: "POST", credentials: "same-origin" });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiDetail(data) || r.statusText);
+      docText.value = "";
+      currentFilename = "document.txt";
+      filenameTag.textContent = "";
+      summaryBody.textContent = "";
+      summaryPanel.hidden = true;
+      chatThread.innerHTML = "";
+      indexBadge.textContent = "Not indexed";
+      indexBadge.classList.remove("ok");
+      setStatus("System refurbished. Start fresh with a new upload.");
+      await refreshSession();
+    } catch (e) {
+      setStatus(String(e.message || e), true);
+    }
+  });
+
+  btnSync.addEventListener("click", async () => {
+    const text = docText.value;
+    setStatus("Indexing…");
+    try {
+      const r = await fetch("/api/index", {
+        method: "POST",
+        ...credentials(),
+        body: JSON.stringify({ text, filename: currentFilename || "document.txt" }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiDetail(data) || r.statusText);
+      indexBadge.textContent = data.chunks + " chunks indexed";
+      indexBadge.classList.add("ok");
+      setStatus("Knowledge base synced.");
+      await refreshSession();
+      if (autoSummarize.checked && docText.value.trim()) {
+        await runSummarize(true);
+      }
+    } catch (e) {
+      setStatus(String(e.message || e), true);
+    }
+  });
+
+  chatForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = chatInput.value.trim();
+    if (!msg) return;
+    chatInput.value = "";
+    appendBubble("user", msg);
+    setStatus("Thinking…");
+    try {
+      const r = await fetch("/api/chat", {
+        method: "POST",
+        ...credentials(),
+        body: JSON.stringify({ message: msg }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiDetail(data) || r.statusText);
+      appendBubble("assistant", data.reply || "");
+      setStatus("");
+      await refreshSession();
+    } catch (err) {
+      appendBubble("assistant", "Error: " + (err.message || err));
+      setStatus("", true);
+    }
+  });
+
+  btnClearChat.addEventListener("click", async () => {
+    await fetch("/api/chat/clear", { method: "POST", credentials: "same-origin" });
+    chatThread.innerHTML = "";
+    await refreshSession();
+  });
+
+  refreshSession();
+})();
+</script>
+{% endblock %}
